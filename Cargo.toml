@@ -34,6 +34,7 @@ vectorcraft-format = { path = "crates/format" }
 vectorcraft-tools = { path = "crates/tools" }
 vectorcraft-engine = { path = "crates/engine" }
 vectorcraft-ui-egui = { path = "crates/ui-egui" }
+vectorcraft-tablet = { path = "crates/tablet" }
 vectorcraft-mcp = { path = "crates/mcp" }
 vectorcraft-testkit = { path = "crates/testkit" }
 vectorcraft-cad = { path = "crates/cad" }

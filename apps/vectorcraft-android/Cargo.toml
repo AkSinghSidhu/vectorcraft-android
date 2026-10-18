@@ -1,0 +1,33 @@
+[package]
+name = "vectorcraft-android"
+description = "VectorCraft on Android tablets (eframe on GameActivity, wgpu Vulkan with a GLES fallback)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "vectorcraft_android"
+# cdylib: the `libvectorcraft_android.so` GameActivity loads; rlib: host unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+vectorcraft-engine = { workspace = true }
+vectorcraft-geom = { workspace = true }
+vectorcraft-text = { workspace = true }
+vectorcraft-ui-egui = { workspace = true }
+vectorcraft-tablet = { workspace = true }
+egui = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "android-game-activity"] }
+android_logger = { version = "0.15", default-features = false }
+# The `AndroidApp` type `android_main` receives (eframe's `NativeOptions::android_app`); eframe
+# doesn't re-export winit. Already in Cargo.lock (eframe); pinned exactly, as in apps/vectorcraft.
+winit = { version = "=0.30.13", default-features = false, features = ["android-game-activity"] }

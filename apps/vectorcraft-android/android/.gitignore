@@ -1,0 +1,5 @@
+.gradle/
+build/
+local.properties
+# Copied in by build.sh from the Cargo target directory.
+app/src/main/jniLibs/

@@ -1,0 +1,77 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The launcher icon comes from the shared app icon (assets/app-icon), copied at build time so
+// the repository keeps one copy of it.
+def iconRes = layout.buildDirectory.dir("generated/icon-res")
+def copyIcon = tasks.register('copyLauncherIcon', Copy) {
+    from(rootProject.file('../../../assets/app-icon/hicolor/512x512/apps/ai.storyteller.vectorcraft.png'))
+    into(iconRes.map { it.dir('mipmap-xxxhdpi') })
+    rename { 'ic_launcher.png' }
+}
+
+// The app version is the workspace's (Cargo.toml), so the APK never lags behind the engine, plus
+// the Android build number (RELEASE_BUILD, from build.sh) for repeat releases of one version:
+// 0.8.2 build 3 is "0.8.2-3", released as android-v0.8.2-3 (the updater compares these).
+// versionCode must grow with every release Android should accept as an update: 0.8.2-3 → 80203.
+def cargoVersion = (rootProject.file('../../../Cargo.toml').text =~ /(?m)^version = "(\d+)\.(\d+)\.(\d+)"/)[0]
+def releaseBuild = (System.getenv('RELEASE_BUILD') ?: '0').toInteger()
+def appVersionName = "${cargoVersion[1]}.${cargoVersion[2]}.${cargoVersion[3]}" + (releaseBuild > 0 ? "-${releaseBuild}" : '')
+def appVersionCode = (cargoVersion[1].toInteger() * 10000 + cargoVersion[2].toInteger() * 100 + cargoVersion[3].toInteger()) * 100 + Math.min(releaseBuild, 99)
+
+android {
+    namespace 'ai.storyteller.vectorcraft'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'ai.storyteller.vectorcraft'
+        minSdk 26
+        targetSdk 35
+        versionCode appVersionCode
+        versionName appVersionName + '-android'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        release {
+            // GameActivity calls into Java by name from native code: keep every class as is.
+            minifyEnabled false
+            // A prototype: signed with the debug key so it installs as is. Sign with your own
+            // key for distribution (see README.md).
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            res.srcDirs += iconRes
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Store the library uncompressed and page-aligned: loaded straight from the APK.
+            useLegacyPackaging = false
+        }
+    }
+}
+
+tasks.named('preBuild') { dependsOn copyIcon }
+
+dependencies {
+    // AndroidX pulls kotlin-stdlib 1.8 next to the old split -jdk7/-jdk8 artifacts; align them.
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core:1.13.1'
+    // The Java half of GameActivity; android-activity (Rust) provides the native glue, so no
+    // prefab. The version must match android-activity's (see its README).
+    implementation 'androidx.games:games-activity:4.4.0'
+}

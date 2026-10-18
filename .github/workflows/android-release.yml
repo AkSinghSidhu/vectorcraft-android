@@ -1,0 +1,62 @@
+# Builds the Android APK and publishes it: artifacts on every run, and a GitHub Release with the
+# APK when the run is a tag (android-v*). The engine spot-checks nothing here on purpose — the
+# desktop CI's platforms stay upstream; this repo's CI is just the Android release train.
+name: android
+
+on:
+  push:
+    tags: ["android-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # the release upload
+
+env:
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: SDK pieces (platform, build-tools, NDK — idempotent)
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" \
+            "platforms;android-35" "build-tools;35.0.0" "ndk;${NDK_VERSION}" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build the APK
+        run: bash apps/vectorcraft-android/build.sh
+
+      - name: Upload the APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vectorcraft-android-apk
+          path: target/android/*.apk
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/android/*.apk
+          generate_release_notes: true
+          name: "VectorCraft Android ${{ github.ref_name }}"

@@ -1,0 +1,601 @@
+package ai.storyteller.vectorcraft;
+
+import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
+import android.util.Log;
+import android.view.MotionEvent;
+import android.webkit.MimeTypeMap;
+import android.widget.Toast;
+
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
+import com.google.androidgamesdk.GameActivity;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * VectorCraft's Activity: GameActivity runs the Rust app (libvectorcraft_android.so); this class
+ * adds what winit doesn't offer on Android.
+ *
+ * <ul>
+ *   <li><b>Pen</b>: winit forwards touches alone, so every MotionEvent's stylus axes (pressure,
+ *       tilt, orientation, tip or eraser end) go to Rust through {@link #nativePen} before the
+ *       event continues to GameActivity (vectorcraft-tablet).</li>
+ *   <li><b>Documents</b>: Storage Access Framework pickers, driven by small JSON files in
+ *       {@code files/bridge} (see {@code src/bridge.rs} for the protocol). Picked documents are
+ *       copied in; files the app writes are copied back to the document they stand for.</li>
+ *   <li><b>Open with / Share</b>: sent documents are copied to {@code bridge/incoming}.</li>
+ * </ul>
+ */
+public class VectorCraftActivity extends GameActivity {
+    private static final String TAG = "VectorCraft";
+    private static final int REQ_OPEN = 1001;
+    private static final int REQ_SAVE = 1002;
+    private static final long POLL_MS = 150;
+
+    static {
+        // GameActivity loads the library too (android.app.lib_name); loading it here first makes
+        // nativePen resolvable from the first touch.
+        System.loadLibrary("vectorcraft_android");
+    }
+
+    /** One pointer of a MotionEvent (vectorcraft-tablet's android.rs). */
+    private static native void nativePen(int action, int tool, int buttons, float pressure, float tilt, float orientation);
+
+    /** A pointer went down: its id and tool type, so Rust tells fingers from pens (touch
+     * gestures, palm rejection; vectorcraft-tablet's android.rs). */
+    private static native void nativePointer(int id, int tool);
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private File bridge;
+    /** The picker request being answered (-1: none), kept across Activity recreation. */
+    private long pendingId = -1;
+    private String pendingName = "";
+    private int incomingSeq = 0;
+
+    private final Runnable poll = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                checkRequest();
+                checkSync();
+                checkQuit();
+            } catch (Exception e) {
+                Log.e(TAG, "bridge", e);
+            }
+            handler.postDelayed(this, POLL_MS);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        bridge = new File(getFilesDir(), "bridge");
+        if (state != null) {
+            pendingId = state.getLong("pendingId", -1);
+            pendingName = state.getString("pendingName", "");
+        }
+        hideSystemBars();
+        handleSentDocument(getIntent());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        hideSystemBars();
+        handler.removeCallbacks(poll);
+        handler.post(poll);
+    }
+
+    @Override
+    protected void onPause() {
+        handler.removeCallbacks(poll);
+        super.onPause();
+    }
+
+    /**
+     * Back sends VectorCraft to the background rather than finishing it: finishing would leave
+     * without the unsaved-work prompt (File › Exit has it).
+     */
+    @Override
+    public void onBackPressed() {
+        moveTaskToBack(true);
+    }
+
+    /** The keyboard was put away: tell the shell (its winit never sees the event). */
+    @Override
+    public void onSoftwareKeyboardVisibilityChanged(boolean visible) {
+        super.onSoftwareKeyboardVisibilityChanged(visible);
+        if (!visible && bridge != null) {
+            try {
+                new File(bridge, "keyboard-hidden").createNewFile();
+            } catch (java.io.IOException e) {
+                Log.w(TAG, "keyboard-hidden", e);
+            }
+        }
+    }
+
+    /**
+     * Once the Activity is finished, end the process, after documents still being written back.
+     * Two reasons: winit's event loop can't be created twice in one process, so a later launch
+     * in this process would fail; and GameActivity's onDestroy waits for the Rust thread to
+     * acknowledge the destroy, which winit's Android backend doesn't do once eframe's loop has
+     * stopped, so calling it hangs the main thread (and every later launch with it).
+     */
+    @Override
+    protected void onDestroy() {
+        if (isFinishing()) {
+            checkSync();
+            io.shutdown();
+            try {
+                if (!io.awaitTermination(20, TimeUnit.SECONDS)) {
+                    Log.w(TAG, "documents still writing back after 20 s; ending anyway");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            Log.i(TAG, "finished; ending the process");
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+        super.onDestroy();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putLong("pendingId", pendingId);
+        out.putString("pendingName", pendingName);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleSentDocument(intent);
+    }
+
+    private void hideSystemBars() {
+        WindowInsetsControllerCompat c = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        c.hide(WindowInsetsCompat.Type.systemBars());
+        c.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    }
+
+    // ---- Pen --------------------------------------------------------------------------------
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            int i = e.getActionIndex();
+            try {
+                nativePointer(e.getPointerId(i), e.getToolType(i));
+            } catch (UnsatisfiedLinkError err) {
+                // The library isn't loaded: every pointer counts as a finger.
+            }
+        }
+        forwardPen(e);
+        return super.dispatchTouchEvent(e);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        forwardPen(e);
+        return super.dispatchGenericMotionEvent(e);
+    }
+
+    private static boolean isPen(int tool) {
+        return tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER;
+    }
+
+    /** The pointer whose pen state this event reports: a pen pointer if any (a palm resting
+     * beside the pen doesn't end its stroke), else the event's own pointer. */
+    private static int penPointer(MotionEvent e) {
+        int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
+            return e.getActionIndex();
+        }
+        for (int i = 0; i < e.getPointerCount(); i++) {
+            if (isPen(e.getToolType(i))) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    private void forwardPen(MotionEvent e) {
+        try {
+            int action = e.getActionMasked();
+            int p = penPointer(e);
+            int tool = e.getToolType(p);
+            int buttons = e.getButtonState();
+            if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
+                // Another finger coming or going says nothing about the pen.
+                if (!isPen(tool)) {
+                    return;
+                }
+            }
+            if (action == MotionEvent.ACTION_MOVE && isPen(tool)) {
+                // Samples the digitizer reported between two frames, oldest first.
+                for (int h = 0; h < e.getHistorySize(); h++) {
+                    nativePen(action, tool, buttons, e.getHistoricalPressure(p, h),
+                            e.getHistoricalAxisValue(MotionEvent.AXIS_TILT, p, h), e.getHistoricalOrientation(p, h));
+                }
+            }
+            nativePen(action, tool, buttons, e.getPressure(p), e.getAxisValue(MotionEvent.AXIS_TILT, p), e.getOrientation(p));
+        } catch (UnsatisfiedLinkError err) {
+            // The library isn't loaded (it failed to load): the pen draws like a finger.
+        } catch (RuntimeException err) {
+            Log.w(TAG, "pen", err);
+        }
+    }
+
+    // ---- Document pickers ---------------------------------------------------------------------
+
+    private void checkRequest() throws Exception {
+        File f = new File(bridge, "request.json");
+        if (pendingId != -1 || !f.isFile()) {
+            return;
+        }
+        JSONObject r = new JSONObject(readText(f));
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+        long id = r.getLong("id");
+        String kind = r.getString("kind");
+        Intent intent;
+        int code;
+        if ("open".equals(kind)) {
+            intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, r.optBoolean("multiple", false));
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            code = REQ_OPEN;
+        } else if ("save".equals(kind)) {
+            pendingName = r.optString("name", "Untitled.svg");
+            intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType(r.optString("mime", "application/octet-stream"))
+                    .putExtra(Intent.EXTRA_TITLE, pendingName);
+            code = REQ_SAVE;
+        } else {
+            answerError(id, "unknown request " + kind);
+            return;
+        }
+        pendingId = id;
+        try {
+            startActivityForResult(intent, code);
+        } catch (ActivityNotFoundException e) {
+            pendingId = -1;
+            answerError(id, "no document picker on this device");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_OPEN && requestCode != REQ_SAVE) {
+            return;
+        }
+        final long id = pendingId;
+        pendingId = -1;
+        if (id == -1) {
+            return;
+        }
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            answerCancelled(id);
+            return;
+        }
+        if (requestCode == REQ_OPEN) {
+            final List<Uri> uris = new ArrayList<>();
+            ClipData clip = data.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    uris.add(clip.getItemAt(i).getUri());
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+            final int flags = data.getFlags();
+            io.execute(() -> copyIn(id, uris, flags));
+        } else {
+            final Uri uri = data.getData();
+            if (uri == null) {
+                answerCancelled(id);
+                return;
+            }
+            // The app picks the format from the extension it asked for. Some providers report
+            // a name without it, or no name at all (Downloads on some devices: an id such as
+            // "msf:1234"), and "Untitled" can't be saved as anything: keep the requested name
+            // unless the provider's only differs in its base (say "Untitled (1).svg").
+            String provided = displayName(uri, pendingName);
+            String name = extensionOf(provided).equals(extensionOf(pendingName)) ? provided : pendingName;
+            if (!name.equals(provided)) {
+                Log.i(TAG, "save: the provider named the document \"" + provided + "\"; writing \"" + name + "\"");
+            }
+            File dest = new File(bridge, "out/" + id + "/" + safeName(name));
+            //noinspection ResultOfMethodCallIgnored
+            dest.getParentFile().mkdirs();
+            remember(dest, uri);
+            try {
+                answer(new JSONObject().put("id", id).put("path", dest.getAbsolutePath()));
+            } catch (Exception e) {
+                Log.e(TAG, "save answer", e);
+            }
+        }
+    }
+
+    /** Copy picked documents into the bridge inbox and answer with their paths. */
+    private void copyIn(long id, List<Uri> uris, int flags) {
+        JSONArray paths = new JSONArray();
+        String error = null;
+        for (Uri uri : uris) {
+            boolean writable = keepAccess(uri, flags);
+            File dest = new File(bridge, "inbox/" + id + "/" + safeName(nameWithExtension(uri)));
+            //noinspection ResultOfMethodCallIgnored
+            dest.getParentFile().mkdirs();
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(dest)) {
+                if (in == null) {
+                    throw new IOException("the provider returned no data");
+                }
+                copy(in, out);
+                paths.put(dest.getAbsolutePath());
+                if (writable) {
+                    remember(dest, uri);
+                } else {
+                    forget(dest);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "open " + uri, e);
+                error = e.getMessage();
+            }
+        }
+        try {
+            JSONObject a = new JSONObject().put("id", id).put("paths", paths);
+            if (error != null) {
+                a.put("error", error);
+            }
+            answer(a);
+        } catch (Exception e) {
+            Log.e(TAG, "open answer", e);
+        }
+    }
+
+    /** Keep access to an opened document across restarts; true when it may be written back. */
+    private boolean keepAccess(Uri uri, int flags) {
+        boolean write = (flags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0;
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | (write ? Intent.FLAG_GRANT_WRITE_URI_PERMISSION : 0));
+        } catch (SecurityException e) {
+            // Not persistable: the grant lasts while the app runs, which is enough to save back.
+        }
+        return write;
+    }
+
+    // ---- Leaving ------------------------------------------------------------------------------
+
+    /** File › Exit (bridge `quit`): finish once pending saves are queued (see onDestroy). */
+    private void checkQuit() {
+        File f = new File(bridge, "quit");
+        if (!f.exists()) {
+            return;
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+        checkSync();
+        finish();
+    }
+
+    // ---- Writing back -------------------------------------------------------------------------
+
+    private void checkSync() {
+        File[] files = new File(bridge, "sync").listFiles((dir, name) -> name.endsWith(".json"));
+        if (files == null) {
+            return;
+        }
+        for (File f : files) {
+            try {
+                String path = new JSONObject(readText(f)).getString("path");
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                final File local = new File(path);
+                final String uri = documents().getString(local.getAbsolutePath(), null);
+                if (uri == null) {
+                    toast("Saved inside VectorCraft only: this document can't be written back. Use File › Save As to choose where to save.");
+                    continue;
+                }
+                io.execute(() -> copyOut(local, Uri.parse(uri)));
+            } catch (Exception e) {
+                Log.e(TAG, "sync " + f, e);
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+        }
+    }
+
+    private void copyOut(File local, Uri uri) {
+        try (InputStream in = new FileInputStream(local);
+             OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
+            if (out == null) {
+                throw new IOException("the provider refused the write");
+            }
+            copy(in, out);
+            Log.i(TAG, "saved " + local.getName() + " to " + uri);
+        } catch (Exception e) {
+            Log.e(TAG, "save " + uri, e);
+            toast("Couldn't save " + local.getName() + ": " + e.getMessage());
+        }
+    }
+
+    private SharedPreferences documents() {
+        return getSharedPreferences("documents", MODE_PRIVATE);
+    }
+
+    private void remember(File local, Uri uri) {
+        documents().edit().putString(local.getAbsolutePath(), uri.toString()).apply();
+    }
+
+    private void forget(File local) {
+        documents().edit().remove(local.getAbsolutePath()).apply();
+    }
+
+    // ---- Documents from other apps ------------------------------------------------------------
+
+    private void handleSentDocument(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        Uri uri = null;
+        if (Intent.ACTION_VIEW.equals(intent.getAction())) {
+            uri = intent.getData();
+        } else if (Intent.ACTION_SEND.equals(intent.getAction())) {
+            uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        }
+        if (uri == null) {
+            return;
+        }
+        // Handled: a recreated Activity mustn't open it again.
+        setIntent(new Intent(Intent.ACTION_MAIN));
+        final Uri from = uri;
+        final String name = (incomingSeq++) + "-" + safeName(nameWithExtension(uri));
+        io.execute(() -> {
+            File dir = new File(bridge, "incoming");
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+            File tmp = new File(dir, name + ".tmp");
+            try (InputStream in = getContentResolver().openInputStream(from);
+                 OutputStream out = new FileOutputStream(tmp)) {
+                if (in == null) {
+                    throw new IOException("the provider returned no data");
+                }
+                copy(in, out);
+            } catch (Exception e) {
+                Log.e(TAG, "incoming " + from, e);
+                toast("Couldn't open the document: " + e.getMessage());
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                return;
+            }
+            if (!tmp.renameTo(new File(dir, name))) {
+                Log.e(TAG, "incoming: rename failed");
+            }
+        });
+    }
+
+    // ---- Helpers ------------------------------------------------------------------------------
+
+    private void answerCancelled(long id) {
+        try {
+            answer(new JSONObject().put("id", id).put("cancelled", true));
+        } catch (Exception e) {
+            Log.e(TAG, "answer", e);
+        }
+    }
+
+    private void answerError(long id, String error) {
+        try {
+            answer(new JSONObject().put("id", id).put("cancelled", true).put("error", error));
+        } catch (Exception e) {
+            Log.e(TAG, "answer", e);
+        }
+    }
+
+    /** Write answer.json under a temporary name, then rename, so Rust never reads half of it. */
+    private synchronized void answer(JSONObject a) throws IOException {
+        File tmp = new File(bridge, "answer.json.tmp");
+        try (OutputStream out = new FileOutputStream(tmp)) {
+            out.write(a.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        if (!tmp.renameTo(new File(bridge, "answer.json"))) {
+            throw new IOException("couldn't publish the answer");
+        }
+    }
+
+    private String displayName(Uri uri, String fallback) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                return c.getString(0);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "display name", e);
+        }
+        String last = uri.getLastPathSegment();
+        return last != null ? last : fallback;
+    }
+
+    /** A document's name with an extension: saving it again (Ctrl+S) picks the format from it.
+     * Without one in the provider's name, the extension of its MIME type is added. */
+    private String nameWithExtension(Uri uri) {
+        String name = displayName(uri, "document");
+        if (!extensionOf(name).isEmpty()) {
+            return name;
+        }
+        String type = null;
+        try {
+            type = getContentResolver().getType(uri);
+        } catch (Exception e) {
+            Log.w(TAG, "type", e);
+        }
+        String ext = type == null ? null : MimeTypeMap.getSingleton().getExtensionFromMimeType(type);
+        Log.i(TAG, "open: \"" + name + "\" has no extension; type " + type + " -> " + ext);
+        return ext == null ? name : name + "." + ext;
+    }
+
+    /** The extension of a file name, lower case; "" for none. */
+    static String extensionOf(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 && dot < name.length() - 1 ? name.substring(dot + 1).toLowerCase(java.util.Locale.ROOT) : "";
+    }
+
+    static String safeName(String name) {
+        String s = name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_").trim();
+        while (s.startsWith(".")) {
+            s = s.substring(1);
+        }
+        return s.isEmpty() ? "document" : s;
+    }
+
+    private static String readText(File f) throws IOException {
+        try (InputStream in = new FileInputStream(f)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            copy(in, out);
+            return out.toString("UTF-8");
+        }
+    }
+
+    private static void copy(InputStream in, OutputStream out) throws IOException {
+        byte[] buf = new byte[1 << 16];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            out.write(buf, 0, n);
+        }
+    }
+
+    private void toast(String text) {
+        runOnUiThread(() -> Toast.makeText(this, text, Toast.LENGTH_LONG).show());
+    }
+}
