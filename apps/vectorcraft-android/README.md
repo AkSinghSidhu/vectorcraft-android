@@ -39,6 +39,11 @@ VectorCraftActivity.java (extends GameActivity)      libvectorcraft_android.so (
 
 ## Touch controls
 
+Ported from morte2437's [photocraft-android](https://github.com/morte2437/photocraft-android)
+(thanks, @morte2437), then adapted to VectorCraft's engine, views and tools; the port covers the
+Shortcut Pad, Touch Input gestures, the pen's side buttons and eraser end, the sample-splicing
+pen path and the screen key.
+
 - **On the canvas, one finger** draws like the pen (or, in the Touch Input settings, moves the
   canvas or does nothing).
 - **Two fingers on the canvas** pan, pinch–zoom and twist–rotate the view, all at once — the art
