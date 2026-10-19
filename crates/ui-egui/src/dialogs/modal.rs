@@ -30,6 +30,9 @@ pub(crate) fn show_at<R>(ctx: &egui::Context, title: &str, id: Id, initial: Vec2
         .resizable(false)
         .title_bar(false)
         .anchor(egui::Align2::CENTER_CENTER, offset(ctx, id, initial))
+        // Never bigger than the screen (a phone's, in either orientation): the dialog can't run
+        // off its edges. What doesn't fit is scrolled or shrunk inside the dialog's own code.
+        .max_size(ctx.content_rect().size() - egui::vec2(2.0 * super::EDGE_GAP, 2.0 * super::EDGE_GAP))
         .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel).inner_margin(egui::Margin::same(margin)))
         .show(ctx, add)?;
     keep_rest(ctx, id, shown.response.rect.height());

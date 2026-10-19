@@ -158,37 +158,74 @@ pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
     let cat = d.str("__category");
     let cat = PREF_CATEGORIES.iter().find(|c| **c == cat).copied().unwrap_or(PREF_CATEGORIES[0]);
     crate::dialogs::modal::show(ctx, tl!("Preferences"), egui::Id::new("dialog-preferences"), -20.0, 20, |ui| {
-        ui.set_width(760.0);
+        // On a desktop-sized screen the full dialog fits: the category list at the left, the
+        // fields at the right. A phone's screen doesn't hold it: a narrower dialog with the
+        // categories as a wrapping row above the fields. (56 = the modal's edge gaps plus its
+        // frame, which limits how wide its contents can be.) A screen of unknown size (drawn
+        // before the window gave one) keeps the desktop layout.
+        let screen_w = ctx.content_rect().width();
+        let avail = if screen_w > 1.0 { (screen_w - 56.0).clamp(200.0, 760.0) } else { 760.0 };
+        // The fields scroll to keep the whole dialog on short screens (again a phone's) visible
+        // without an outside scroll.
+        let screen_h = ctx.content_rect().height();
+        let room = if screen_h > 1.0 { (screen_h - 220.0).clamp(120.0, 400.0) } else { 400.0 };
+        ui.set_width(avail);
         crate::dialogs::modal::heading(ui, tl!("Preferences"));
         ui.add_space(12.0);
-        ui.horizontal_top(|ui| {
-            // Category list.
-            egui::Frame::NONE.fill(t.panel_darker).corner_radius(egui::CornerRadius::same(4)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                ui.set_width(196.0);
-                ui.set_min_height(430.0);
+        if avail >= 740.0 {
+            ui.horizontal_top(|ui| {
+                // Category list.
+                egui::Frame::NONE.fill(t.panel_darker).corner_radius(egui::CornerRadius::same(4)).inner_margin(egui::Margin::same(6)).show(
+                    ui,
+                    |ui| {
+                        ui.set_width(196.0);
+                        ui.set_min_height(430.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            for c in PREF_CATEGORIES {
+                                let sel = *c == cat;
+                                let text = egui::RichText::new(tl!(*c)).size(12.5).color(if sel { t.text_strong } else { t.text });
+                                let b = egui::Button::selectable(sel, text).min_size(egui::vec2(184.0, 24.0));
+                                if ui.add(b).clicked() {
+                                    d.fields.insert("__category".into(), json!(c));
+                                }
+                            }
+                        });
+                    },
+                );
+                ui.add_space(14.0);
+                // Fields.
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.set_width(avail - 210.0);
+                    ui.label(egui::RichText::new(tl!(cat)).font(theme::semibold(14.0)).color(t.text_strong));
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical().id_salt(("prefs", cat)).max_height(room).auto_shrink([false, false]).show(ui, |ui| {
+                        category_fields(ui, &mut d, cat);
+                    });
+                });
+            });
+        } else {
+            // Categories, as a wrapping row.
+            egui::Frame::NONE.fill(t.panel_darker).corner_radius(egui::CornerRadius::same(4)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
                     for c in PREF_CATEGORIES {
                         let sel = *c == cat;
                         let text = egui::RichText::new(tl!(*c)).size(12.5).color(if sel { t.text_strong } else { t.text });
-                        let b = egui::Button::selectable(sel, text).min_size(egui::vec2(184.0, 24.0));
-                        if ui.add(b).clicked() {
+                        if ui.add(egui::Button::selectable(sel, text)).clicked() {
                             d.fields.insert("__category".into(), json!(c));
                         }
                     }
                 });
             });
-            ui.add_space(14.0);
-            // Fields.
-            ui.vertical(|ui| {
-                ui.set_width(530.0);
-                ui.label(egui::RichText::new(tl!(cat)).font(theme::semibold(14.0)).color(t.text_strong));
-                ui.add_space(8.0);
-                egui::ScrollArea::vertical().id_salt(("prefs", cat)).max_height(400.0).auto_shrink([false, false]).show(ui, |ui| {
-                    category_fields(ui, &mut d, cat);
-                });
+            ui.add_space(8.0);
+            // Fields, at whatever width the screen leaves.
+            ui.label(egui::RichText::new(tl!(cat)).font(theme::semibold(14.0)).color(t.text_strong));
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical().id_salt(("prefs", cat)).max_height(room).auto_shrink([false, false]).show(ui, |ui| {
+                category_fields(ui, &mut d, cat);
             });
-        });
+        }
         ui.add_space(14.0);
         ui.horizontal(|ui| {
             if widgets::secondary_button(ui, tl!("Reset Preferences"))

@@ -446,22 +446,29 @@ impl eframe::App for Shell {
         // section under them.
         if self.settings_open {
             let mut open = true;
+            let screen = ui.ctx().content_rect().size();
             let center = ui.ctx().content_rect().center();
             egui::Window::new("Shortcut Pad")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable([true, true])
-                .default_width(380.0)
+                // Never bigger than the screen (a phone's, in either orientation).
+                .max_size(screen - egui::vec2(16.0, 16.0))
+                .default_width(380.0_f32.min(screen.x - 24.0))
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(center)
                 .show(ui.ctx(), |ui| {
-                    self.pad.settings_body(ui, &tokens);
-                    self.touch.settings_body(
-                        ui,
-                        &tokens,
-                        vectorcraft_tablet::android::controls_held(),
-                        vectorcraft_tablet::android::last_buttons(),
-                    );
+                    // What doesn't fit a short screen scrolls here instead of running past the
+                    // screen's edges.
+                    egui::ScrollArea::vertical().auto_shrink([true, true]).show(ui, |ui| {
+                        self.pad.settings_body(ui, &tokens);
+                        self.touch.settings_body(
+                            ui,
+                            &tokens,
+                            vectorcraft_tablet::android::controls_held(),
+                            vectorcraft_tablet::android::last_buttons(),
+                        );
+                    });
                 });
             self.settings_open = open;
         }
