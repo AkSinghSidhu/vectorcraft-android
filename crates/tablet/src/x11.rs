@@ -35,12 +35,19 @@ pub fn spawn(display: Option<&str>, callback: impl Fn(Option<Sample>) + Send + '
     let (conn, screen) = RustConnection::connect(display).map_err(|e| Error::Unsupported(format!("cannot connect to the X server: {e}")))?;
     let root = conn.setup().roots.get(screen).map(|s| s.root).ok_or_else(|| Error::Platform(format!("X screen {screen} not found")))?;
     // Raw events for everyone (not just the grabbing client) need XI 2.1; ask for 2.2.
-    let version =
-        conn.xinput_xi_query_version(2, 2).map_err(|e| Error::Platform(e.to_string()))?.reply().map_err(|e| Error::Unsupported(format!("no XInput2: {e}")))?;
+    let version = conn
+        .xinput_xi_query_version(2, 2)
+        .map_err(|e| Error::Platform(e.to_string()))?
+        .reply()
+        .map_err(|e| Error::Unsupported(format!("no XInput2: {e}")))?;
     if (version.major_version, version.minor_version) < (2, 1) {
         return Err(Error::Unsupported(format!("XInput {}.{} (raw events need 2.1)", version.major_version, version.minor_version)));
     }
-    let mask = XIEventMask::RAW_MOTION | XIEventMask::RAW_BUTTON_PRESS | XIEventMask::RAW_BUTTON_RELEASE | XIEventMask::HIERARCHY | XIEventMask::DEVICE_CHANGED;
+    let mask = XIEventMask::RAW_MOTION
+        | XIEventMask::RAW_BUTTON_PRESS
+        | XIEventMask::RAW_BUTTON_RELEASE
+        | XIEventMask::HIERARCHY
+        | XIEventMask::DEVICE_CHANGED;
     conn.xinput_xi_select_events(root, &[xinput::EventMask { deviceid: ALL_DEVICES, mask: vec![mask] }])
         .map_err(|e| Error::Platform(e.to_string()))?
         .check()

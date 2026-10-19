@@ -222,7 +222,13 @@ mod tests {
         assert_eq!(st.handle(&prox(device::CURSOR, true)), Update::Set(None));
         assert!(!set(st.handle(&prox(device::UNKNOWN, true))).unwrap().eraser);
         // Proximity as a mouse-event subtype works the same.
-        let e = RawEvent { kind: event_type::MOUSE_MOVED, subtype: subtype::TABLET_PROXIMITY, device: device::ERASER, entering: true, ..Default::default() };
+        let e = RawEvent {
+            kind: event_type::MOUSE_MOVED,
+            subtype: subtype::TABLET_PROXIMITY,
+            device: device::ERASER,
+            entering: true,
+            ..Default::default()
+        };
         assert!(set(st.handle(&e)).unwrap().eraser);
     }
 

@@ -10,6 +10,11 @@
 //!   zooms, rotates the view or sizes the freehand tools (all smoothly), or steps through
 //!   history, at the chosen sensitivity. Tapping the centre switches to the next of the chosen
 //!   functions (without opening the ring).
+//! - Each key can have a colour (the settings), so keys are told apart by what they do at a
+//!   glance.
+//! - The key above the keyboard key, always there too, steps through full screen: first keeping
+//!   the menu bar, then the canvas alone, then back (full screen has no menu bar, so without a
+//!   keyboard there was no way back).
 //! - The key at the very bottom, always there, opens the on-screen keyboard (and closes it
 //!   again); its letters reach the app's shortcuts.
 //! - The gear key at the very top, always there, opens this pad's settings and Touch Input's.
@@ -18,7 +23,7 @@ pub mod config;
 pub mod router;
 pub mod wheel;
 
-use config::{MAX_KEYS, MIN_KEYS, Chord, PadConfig, SENSITIVITY_RANGE, Side, WHEEL_SIZE_RANGE, WheelMode};
+use config::{Chord, MAX_KEYS, MIN_KEYS, PadConfig, SENSITIVITY_RANGE, Side, WHEEL_SIZE_RANGE, WheelMode};
 use egui::{Align2, Event, FontId, Key, Modifiers, Stroke};
 use router::{Control, Env, Layout, PadTouch, Routed, Router, ViewMove};
 use vectorcraft_ui_egui::VectorcraftApp;
@@ -65,6 +70,10 @@ pub struct Pad {
     keyboard_tapped: bool,
     /// The gear key was tapped (the shell opens the settings window).
     settings_tapped: bool,
+    /// The full screen key was tapped (the screen mode switches in `run_pending`).
+    screen_tapped: bool,
+    /// The screen mode last frame, for the full screen key's icon.
+    screen_step: ScreenStep,
     /// The shell has the on-screen keyboard open for the pad (the key is lit).
     pub keyboard_on: bool,
     /// The window's content area last frame (keeps the large ring on screen).
@@ -123,6 +132,8 @@ impl Pad {
             slid: false,
             keyboard_tapped: false,
             settings_tapped: false,
+            screen_tapped: false,
+            screen_step: ScreenStep::Normal,
             keyboard_on: false,
             screen: egui::Rect::NOTHING,
             logged: false,
@@ -160,6 +171,9 @@ impl Pad {
                 Routed::App(e) => out.push(e),
                 Routed::Pad(t) => self.touch(t, &mut out),
                 Routed::View(m) => self.views.push(m),
+                // No sideways-scrolling strip in the layout yet: the router only reports one
+                // when `Env::scroll_strip` is set (the options bar of a document viewer would).
+                Routed::StripScroll(_) => {}
                 Routed::Tap(fingers) => {
                     let shortcut = match fingers {
                         2 => &env.config.two_finger_tap,
@@ -204,6 +218,7 @@ impl Pad {
                 }
             }
             PadTouch::Down(Control::Keyboard, _) => self.keyboard_tapped = true,
+            PadTouch::Down(Control::ScreenMode, _) => self.screen_tapped = true,
             PadTouch::Down(Control::Settings, _) => self.settings_tapped = true,
             // The centre is a button: a tap that doesn't slide switches function when lifted,
             // and it neither opens the large ring nor turns.
@@ -261,6 +276,14 @@ impl Pad {
     /// Apply the wheel's changes (from `logic`, before the app's). A frame's movements are
     /// merged: one zoom, one rotation, one size change, however many touch events came in.
     pub fn run_pending(&mut self, app: &mut VectorcraftApp, ctx: &egui::Context) {
+        if self.take_screen_tap() {
+            // Normal → full screen keeping the menu bar → full screen → normal.
+            let next = ScreenStep::of(app).next();
+            if let Err(e) = app.run("view.screenMode", serde_json::json!({ "mode": next.mode() })) {
+                log::warn!("Shortcut Pad full screen key: {e}");
+            }
+            ctx.request_repaint();
+        }
         let views = std::mem::take(&mut self.views);
         if !views.is_empty() {
             crate::touch::apply(app, &views);
@@ -298,10 +321,12 @@ impl Pad {
             v.rotation = vectorcraft_geom::normalize_deg(v.rotation + rotate);
             v.fitted = true;
         }
-        if size != 1.0 && FREEHAND_TOOLS.contains(&app.session.tool_id())
-            && let Err(e) = self.freehand_size(app, size) {
-                log::debug!("Shortcut Pad wheel: freehand size: {e}");
-            }
+        if size != 1.0
+            && FREEHAND_TOOLS.contains(&app.session.tool_id())
+            && let Err(e) = self.freehand_size(app, size)
+        {
+            log::debug!("Shortcut Pad wheel: freehand size: {e}");
+        }
         ctx.request_repaint();
     }
 
@@ -364,6 +389,7 @@ impl Pad {
     /// Draw the pad (before the app, which then lays out in the rest of the window).
     pub fn show(&mut self, ui: &mut egui::Ui, tk: &Tokens, app: &VectorcraftApp) {
         self.screen = ui.ctx().content_rect();
+        self.screen_step = ScreenStep::of(app);
         let config = self.shared.borrow().config.clone();
         if !config.enabled {
             self.layout = None;
@@ -413,10 +439,19 @@ impl Pad {
         let font = FontId::proportional(if l.key_height() < 36.0 { 11.0 } else { 12.0 });
         for (i, rect) in l.keys.iter().enumerate() {
             let down = self.held.contains_key(&i);
-            p.rect(*rect, tk.radius, if down { tk.accent } else { tk.input }, Stroke::new(1.0, tk.input_border), egui::StrokeKind::Inside);
+            let key_color = config.keys.get(i).and_then(|k| k.color).map(|[r, g, b]| egui::Color32::from_rgb(r, g, b));
+            let (fill, color) = match key_color {
+                // A coloured key lightens while held; its label is dark or light, whichever reads.
+                Some(c) => {
+                    let fill = if down { c.lerp_to_gamma(egui::Color32::WHITE, 0.35) } else { c };
+                    (fill, contrasting_text(fill))
+                }
+                None if down => (tk.accent, tk.text_strong),
+                None => (tk.input, tk.text),
+            };
+            p.rect(*rect, tk.radius, fill, Stroke::new(if down { 2.0 } else { 1.0 }, tk.input_border), egui::StrokeKind::Inside);
             let label = config.keys.get(i).map(|k| k.label.as_str()).unwrap_or("");
             let label = label.to_string();
-            let color = if down { tk.text_strong } else { tk.text };
             // The largest size that fits the key's width (typed labels can be wide), clipped
             // to the key at the smallest.
             let room = rect.width() - 6.0;
@@ -447,6 +482,36 @@ impl Pad {
         p.text(l.center, Align2::CENTER_CENTER, mode.short(), FontId::proportional(9.0), tk.text_dim);
         self.paint_gear_key(p, l.settings, tk);
         self.paint_keyboard_key(p, l.keyboard, tk);
+        self.paint_screen_key(p, l.screen_mode, tk);
+    }
+
+    /// The full screen key, drawn like a video player's, showing what a tap does: four corners
+    /// pointing out to go (further) full screen, pointing in to come back. Lit in full screen;
+    /// with the menu bar kept, a bar along its left edge.
+    fn paint_screen_key(&self, p: &egui::Painter, rect: egui::Rect, tk: &Tokens) {
+        let step = self.screen_step;
+        let lit = step != ScreenStep::Normal;
+        p.rect(rect, tk.radius, if lit { tk.accent } else { tk.input }, Stroke::new(1.0, tk.input_border), egui::StrokeKind::Inside);
+        let ink = Stroke::new(2.0, if lit { tk.text_strong } else { tk.text });
+        let on = step.next() == ScreenStep::Normal;
+        if step == ScreenStep::WithToolbar {
+            let x = rect.left() + 5.0;
+            p.line_segment([egui::pos2(x, rect.top() + 6.0), egui::pos2(x, rect.bottom() - 6.0)], Stroke::new(3.0, ink.color));
+        }
+        let half = (rect.height() * 0.28).min(rect.width() * 0.3);
+        let arm = half * 0.55;
+        let c = rect.center();
+        for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            // The corner's point, and its arms going back along both edges.
+            let (corner, back) = if on {
+                // Inward: the corner sits nearer the middle, its arms reaching out.
+                (c + egui::vec2(sx, sy) * (half - arm), egui::vec2(sx, sy) * arm)
+            } else {
+                (c + egui::vec2(sx, sy) * half, -egui::vec2(sx, sy) * arm)
+            };
+            p.line_segment([corner, corner + egui::vec2(back.x, 0.0)], ink);
+            p.line_segment([corner, corner + egui::vec2(0.0, back.y)], ink);
+        }
     }
 
     /// The settings key: a gear drawn in it, lit while the settings window is open. It is a
@@ -510,15 +575,17 @@ impl Pad {
         ui.label("Keys (top to bottom). A modifier on its own, such as Alt, is held while the key is touched.");
         let above = c.keys.len().div_ceil(2);
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            egui::Grid::new("pad_keys").num_columns(4).spacing([8.0, 6.0]).show(ui, |ui| {
+            egui::Grid::new("pad_keys").num_columns(5).spacing([8.0, 6.0]).show(ui, |ui| {
                 ui.label("");
                 ui.label("Label");
+                ui.label("Color");
                 ui.label("Preset");
                 ui.label("Shortcut");
                 ui.end_row();
                 for (i, key) in c.keys.iter_mut().enumerate() {
                     ui.label(format!("Key {}", i + 1)).on_hover_text(if i < above { "Above the wheel" } else { "Below the wheel" });
                     ui.add_sized([84.0, 24.0], egui::TextEdit::singleline(&mut key.label).char_limit(8));
+                    color_choice(ui, tk, i, &mut key.color);
                     egui::ComboBox::from_id_salt(("pad_preset", i)).selected_text("Choose…").width(110.0).show_ui(ui, |ui| {
                         for (name, label, shortcut) in config::PRESETS {
                             if ui.selectable_label(key.shortcut == *shortcut, format!("{name}  ({shortcut})")).clicked() {
@@ -580,6 +647,11 @@ impl Pad {
         std::mem::take(&mut self.settings_tapped)
     }
 
+    /// Whether the full screen key was tapped since the last call.
+    pub fn take_screen_tap(&mut self) -> bool {
+        std::mem::take(&mut self.screen_tapped)
+    }
+
     /// Whether the pad needs frames: a finger is on it.
     pub fn active(&self) -> bool {
         self.router.pad_active()
@@ -588,6 +660,84 @@ impl Pad {
 
 fn key_event(key: Key, pressed: bool) -> Event {
     Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: Modifiers::NONE }
+}
+
+/// Where the full screen key is in its cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScreenStep {
+    Normal,
+    /// Full screen with the menu bar kept (the first step).
+    WithToolbar,
+    Full,
+}
+
+impl ScreenStep {
+    /// The engine's `view.screenMode` numbers: 0 normal, 1 full screen with the menu bar, 2 full
+    /// screen (and 3, presentation, treated as full screen: the next step back is normal).
+    fn of(app: &VectorcraftApp) -> Self {
+        match app.ui.screen_mode {
+            0 => ScreenStep::Normal,
+            1 => ScreenStep::WithToolbar,
+            _ => ScreenStep::Full,
+        }
+    }
+
+    /// What a tap goes to.
+    fn next(self) -> Self {
+        match self {
+            ScreenStep::Normal => ScreenStep::WithToolbar,
+            ScreenStep::WithToolbar => ScreenStep::Full,
+            ScreenStep::Full => ScreenStep::Normal,
+        }
+    }
+
+    /// The mode number to hand `view.screenMode`.
+    fn mode(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Dark or light text, whichever reads on `fill`.
+fn contrasting_text(fill: egui::Color32) -> egui::Color32 {
+    let luma = 0.299 * fill.r() as f32 + 0.587 * fill.g() as f32 + 0.114 * fill.b() as f32;
+    if luma > 150.0 { egui::Color32::from_rgb(20, 20, 20) } else { egui::Color32::WHITE }
+}
+
+/// A swatch for painting a colour choice (the theme's key colour when `None`).
+fn swatch(ui: &mut egui::Ui, tk: &Tokens, color: Option<[u8; 3]>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let fill = color.map_or(tk.input, |[r, g, b]| egui::Color32::from_rgb(r, g, b));
+    ui.painter().rect(rect, 3.0, fill, Stroke::new(1.0, tk.input_border), egui::StrokeKind::Inside);
+}
+
+/// A key's colour: the theme's, one of [`config::KEY_COLORS`], or any other picked.
+fn color_choice(ui: &mut egui::Ui, tk: &Tokens, i: usize, color: &mut Option<[u8; 3]>) {
+    ui.horizontal(|ui| {
+        let name = match color {
+            None => "Default",
+            Some(c) => config::KEY_COLORS.iter().find(|(_, k)| k == c).map_or("Custom", |(n, _)| *n),
+        };
+        egui::ComboBox::from_id_salt(("pad_color", i)).selected_text(name).width(84.0).show_ui(ui, |ui| {
+            let mut row = |ui: &mut egui::Ui, label: &str, value: Option<[u8; 3]>| {
+                let r = ui.horizontal(|ui| {
+                    swatch(ui, tk, value);
+                    ui.selectable_label(*color == value, label)
+                });
+                if r.inner.clicked() {
+                    *color = value;
+                }
+            };
+            row(ui, "Default", None);
+            for (n, c) in config::KEY_COLORS {
+                row(ui, n, Some(*c));
+            }
+        });
+        // Any other colour: the swatch opens a picker.
+        let mut rgb = color.unwrap_or([128, 128, 128]);
+        if egui::widgets::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+            *color = Some(rgb);
+        }
+    });
 }
 
 fn modifier_keys(c: Chord) -> Vec<Key> {
@@ -635,7 +785,16 @@ mod tests {
     fn run(p: &mut Pad, events: Vec<Event>) -> Vec<Event> {
         let mut raw = egui::RawInput { events, ..Default::default() };
         let config = TouchConfig::default();
-        let env = Env { canvas: None, is_finger: &|_| true, pen_near: false, config: &config, list_item: &|_| false, now: 0.0 };
+        let env = Env {
+            canvas: None,
+            is_finger: &|_| true,
+            pen_near: false,
+            config: &config,
+            list_item: &|_| false,
+            secondary: &|_| false,
+            scroll_strip: None,
+            now: 0.0,
+        };
         p.input(&egui::Context::default(), &mut raw, &env, |_| false);
         raw.events
     }
@@ -734,6 +893,18 @@ mod tests {
     }
 
     #[test]
+    fn the_full_screen_key_keeps_the_menu_bar_first_then_hides_everything() {
+        use ScreenStep::*;
+        assert_eq!((Normal.next(), WithToolbar.next(), Full.next()), (WithToolbar, Full, Normal));
+        // The engine's mode numbers (view.screenMode: 0 normal, 1 with the menu bar, 2 full).
+        assert_eq!((Normal.mode(), WithToolbar.mode(), Full.mode()), (0, 1, 2));
+        // Presentation mode (3) counts as full screen: the next step back is normal.
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.ui.screen_mode = 3;
+        assert_eq!(ScreenStep::of(&app), Full);
+    }
+
+    #[test]
     fn press_and_release_mirror_each_other() {
         let c = config::parse("Ctrl+Shift+Alt+S").unwrap();
         let down: Vec<(Key, bool)> = keys(&press(c));
@@ -747,11 +918,8 @@ mod tests {
     fn show_paints_the_keys_and_wheel_in_its_strip() {
         let (mut p, dir) = pad();
         let ctx = egui::Context::default();
-        let raw = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1072.0, 800.0))),
-            time: Some(0.0),
-            ..Default::default()
-        };
+        let raw =
+            egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1072.0, 800.0))), time: Some(0.0), ..Default::default() };
         let app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
         let mut out = ctx.run_ui(raw, |ui| {
             let tk = Tokens::get(ui.ctx());

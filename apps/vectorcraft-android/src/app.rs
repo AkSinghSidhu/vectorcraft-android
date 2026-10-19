@@ -4,12 +4,13 @@
 //! modifiers ([`crate::keys`]).
 
 use crate::bridge::Bridge;
+use crate::touch::config::{PenAction, PenControl};
 use std::path::PathBuf;
 use std::sync::Arc;
-use winit::platform::android::activity::AndroidApp;
-use winit::platform::android::activity::input::{ImeOptions, InputType, TextInputAction, TextInputState, TextSpan};
 use vectorcraft_engine::Session;
 use vectorcraft_ui_egui::{UiState, VectorcraftApp};
+use winit::platform::android::activity::AndroidApp;
+use winit::platform::android::activity::input::{ImeOptions, InputType, TextInputAction, TextInputState, TextSpan};
 
 /// android-activity looks the entry point up by name, hence `no_mangle` (this crate's only
 /// `unsafe`, allowed on this one function).
@@ -52,8 +53,7 @@ fn run(android: AndroidApp) -> Result<(), String> {
     }
 
     // The saved preferences come back as on the desktop (written out after each confirmed change).
-    let saved: Option<UiState> =
-        std::fs::read(files_dir.join("prefs.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let saved: Option<UiState> = std::fs::read(files_dir.join("prefs.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
 
     eframe::run_native(
         "VectorCraft",
@@ -98,18 +98,25 @@ fn run(android: AndroidApp) -> Result<(), String> {
             let place = app.services.place_inbox.clone().unwrap_or_else(|| Arc::default());
             crate::services::watch_incoming(bridge.clone(), inbox, place, cc.egui_ctx.clone());
 
-            // The Activity's pen hook feeds every stylus sample here; a pen's tilt and eraser end
-            // (which winit drops) are logged for now, and the pen path is proven live. The
-            // pointer's pressure already flows through winit itself (`Touch.force`).
+            // The Activity's pen hook feeds every stylus sample here: the first is logged once,
+            // and while a control set to erase is in use the flag below stands (the Eraser tool
+            // switch in `raw_input_hook`). The pointer's pressure already flows through winit
+            // itself (`Touch.force`); the whole path is spliced back per frame (see
+            // `pen_path`).
             let first = std::sync::atomic::AtomicBool::new(true);
-            if let Err(e) = vectorcraft_tablet::android::install(move |sample| {
-                if let Some(s) = sample {
-                    let first = &first;
-                    if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let erasing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sink = {
+                let erasing = erasing.clone();
+                move |sample: Option<vectorcraft_tablet::Sample>| {
+                    erasing.store(sample.is_some_and(|s| s.eraser), std::sync::atomic::Ordering::Relaxed);
+                    if first.swap(false, std::sync::atomic::Ordering::Relaxed)
+                        && let Some(s) = sample
+                    {
                         log::info!("first pen sample: {s:?}");
                     }
                 }
-            }) {
+            };
+            if let Err(e) = vectorcraft_tablet::android::install(sink) {
                 log::warn!("pen hook: {e}");
             }
 
@@ -128,6 +135,9 @@ fn run(android: AndroidApp) -> Result<(), String> {
                 touch,
                 drawn: Default::default(),
                 settings_open: false,
+                pen_path: Vec::new(),
+                pen_erasing: erasing,
+                erasing_tool: None,
             }))
         }),
     )
@@ -187,6 +197,13 @@ struct Shell {
     drawn: crate::touch::Snapshot,
     /// The Shortcut Pad's and Touch Input's settings window (the pad's top gear key opens it).
     settings_open: bool,
+    /// The pen's samples of this frame not yet spliced into the input (see [`crate::pen_path`]).
+    pen_path: Vec<(f32, f32)>,
+    /// Set by the pen hook while one of the controls set to erase is in use; the Eraser tool is
+    /// selected for it and the previous tool comes back after ([`Self::erasing_tool`]).
+    pen_erasing: Arc<std::sync::atomic::AtomicBool>,
+    /// The tool to put back when the pen stops erasing.
+    erasing_tool: Option<&'static str>,
 }
 
 impl Shell {
@@ -307,6 +324,56 @@ impl eframe::App for Shell {
         // every finger: gestures move the view and taps run the Touch Input shortcuts, a lone
         // finger becomes the pointer after a moment, and palms wait while the pen is near.
         let config = self.touch.config();
+        // The pen erases while a control set to erase is in use: the Eraser tool is selected
+        // for it (before this frame's pen events are consumed) and the previous tool comes
+        // back after. The flag comes from the pen hook's samples.
+        let erasing = self.pen_erasing.load(std::sync::atomic::Ordering::Relaxed) && self.app.session.active_index().is_some();
+        if erasing && self.erasing_tool.is_none() {
+            let current = self.app.session.tool_id();
+            self.erasing_tool = (current != "eraser").then_some(current);
+            if current != "eraser"
+                && let Err(e) = self.app.run("tool.select", serde_json::json!({ "tool": "eraser" }))
+            {
+                log::warn!("pen eraser: {e}");
+            }
+        } else if !erasing
+            && let Some(tool) = self.erasing_tool.take()
+            && let Err(e) = self.app.run("tool.select", serde_json::json!({ "tool": tool }))
+        {
+            log::warn!("pen eraser: {e}");
+        }
+        // The pen's side buttons and eraser end (Touch Input settings): erasing is the shell's
+        // (above), right-clicks while touching are the router's, presses are handled here.
+        vectorcraft_tablet::android::set_erasing_controls(config.erasing_controls());
+        let presses = vectorcraft_tablet::android::take_presses();
+        for p in &presses {
+            let setting = config.pen(p.control);
+            if setting.action != PenAction::Shortcut {
+                continue;
+            }
+            match crate::pad::config::parse(&setting.shortcut) {
+                Ok(chord) if !chord.is_empty() => {
+                    raw.events.extend(crate::pad::press(chord));
+                    raw.events.extend(crate::pad::release(chord));
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("pen {:?}: {e}", p.control),
+            }
+        }
+        // A pen or mouse presses the secondary button: a mouse's right button, a pen's side
+        // button set to right-click (hovering shows a context menu; while touching, the
+        // router's hold and drag work with it).
+        let secondary = |id: egui::TouchId| {
+            let buttons = vectorcraft_tablet::android::pointer_buttons(id.0);
+            match vectorcraft_tablet::android::pointer_tool(id.0) {
+                Some(t) if t == vectorcraft_tablet::motion::tool::MOUSE => buttons & vectorcraft_tablet::motion::button::SECONDARY != 0,
+                Some(t) => {
+                    let used = vectorcraft_tablet::motion::controls(t, buttons);
+                    PenControl::ALL.iter().any(|c| used[c.index()] && config.pen(*c).action == PenAction::RightClick)
+                }
+                None => false,
+            }
+        };
         let env = crate::pad::router::Env {
             // Gestures move the canvas only while a document is open.
             canvas: self.app.session.active_index().map(|_| self.app.canvas_rect).flatten(),
@@ -314,12 +381,52 @@ impl eframe::App for Shell {
             pen_near: vectorcraft_tablet::android::pen_seen_within(std::time::Duration::from_millis(300)),
             config: &config,
             list_item: &|p: egui::Pos2| self.drawn.list_item(p),
+            secondary: &secondary,
+            // No sideways-scrolling strip in the layout yet (the Control panel doesn't
+            // overflow): the router's strip handling stays switched off.
+            scroll_strip: None,
             now: raw.time.unwrap_or_else(|| ctx.input(|i| i.time)),
         };
+        // Every pen sample's position, not just each event's latest (see `pen_path`). Samples
+        // wait for a frame with the pen's touch in it; a new touch-down drops older ones.
+        let is_pen = |id: egui::TouchId| {
+            use vectorcraft_tablet::motion::tool;
+            matches!(vectorcraft_tablet::android::pointer_tool(id.0), Some(tool::STYLUS | tool::ERASER))
+        };
+        if raw.events.iter().any(|e| matches!(e, egui::Event::Touch { id, phase: egui::TouchPhase::Start, .. } if is_pen(*id))) {
+            self.pen_path.clear();
+        }
+        self.pen_path.extend(vectorcraft_tablet::android::take_pen_path());
+        if self.pen_path.len() > 480 {
+            let extra = self.pen_path.len() - 480;
+            self.pen_path.drain(..extra);
+        }
+        if crate::pen_path::splice(&mut raw.events, &self.pen_path, ctx.pixels_per_point(), is_pen) > 0 {
+            self.pen_path.clear();
+        }
         let drawn = &self.drawn;
         self.pad.input(ctx, raw, &env, |p| drawn.covered(p));
         if self.pad.take_settings_tap() {
             self.settings_open = true;
+        }
+        // A side button pressed while the pen hovers: a right-click under the pen (after the
+        // router, which replaces pointer events with its own).
+        let ppp = ctx.pixels_per_point();
+        for p in presses {
+            if let (Some((x, y)), PenAction::RightClick, PenControl::Lower | PenControl::Upper | PenControl::Top) =
+                (p.hover, config.pen(p.control).action, p.control)
+            {
+                let pos = egui::pos2(x / ppp, y / ppp);
+                raw.events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
         }
         self.keys.apply(raw);
         self.app.raw_input_hook(raw);
@@ -349,7 +456,12 @@ impl eframe::App for Shell {
                 .default_pos(center)
                 .show(ui.ctx(), |ui| {
                     self.pad.settings_body(ui, &tokens);
-                    self.touch.settings_body(ui, &tokens);
+                    self.touch.settings_body(
+                        ui,
+                        &tokens,
+                        vectorcraft_tablet::android::controls_held(),
+                        vectorcraft_tablet::android::last_buttons(),
+                    );
                 });
             self.settings_open = open;
         }

@@ -254,8 +254,11 @@ mod tests {
 
     #[test]
     fn tilt_ranges_that_are_not_degrees_are_scaled() {
-        let d =
-            Device::new(1, "pen", [(2, "Abs Pressure".into(), 0.0, 1023.0), (3, "Abs Tilt X".into(), 0.0, 127.0), (4, "Abs Tilt Y".into(), -1000.0, 1000.0)]);
+        let d = Device::new(
+            1,
+            "pen",
+            [(2, "Abs Pressure".into(), 0.0, 1023.0), (3, "Abs Tilt X".into(), 0.0, 127.0), (4, "Abs Tilt Y".into(), -1000.0, 1000.0)],
+        );
         let mut st = State::default();
         st.set_devices([d]);
         let s = sample(st.handle(1, [(3, 127.0), (4, -1000.0)]));

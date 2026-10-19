@@ -49,13 +49,23 @@ VectorCraftActivity.java (extends GameActivity)      libvectorcraft_android.so (
   three-finger tap redoes (`Ctrl+Shift+Z`) by default — any command's shortcut can be set.
 - **Palm rejection:** fingers are ignored while the pen is touching or near the screen; a pen
   touching down drops fingers already resting.
+- **A finger held still** on a button, tab or row right-clicks it (context menus, closing
+  panels) — on in the Touch Input settings, off there too.
+- **The pen's buttons and eraser end** work like a Wacom pen's: the lower side button
+  right-clicks (a press while hovering opens the context menu under the pen; held while
+  touching, clicks and drags with the right button), the upper side button and the eraser end
+  erase with the Eraser tool (back to the previous tool after), and any of them can instead run
+  a shortcut or do nothing — pen buttons 1–3 and the eraser end are in the Touch Input settings.
+  A pressed button or the eraser end lights up green there, so buttons can be told apart, and
+  the button-state figure shows what an unusual pen sends.
 - **Menus, panels and lists:** two fingers scroll (and keep gliding after they lift); one finger
   flicking up or down on a draggable list row (Layers panel rows, preset cards) scrolls the list
   instead of dragging; holding a row still grabs it, and a sideways drag moves a slider.
 - **The Shortcut Pad** sits on the right edge (a setting moves it left):
   - 2–10 keys (default: Undo, Redo, hold-Alt, hold-Space for pan). A key presses its shortcut
     while touched — `Ctrl+Z` undoes; a modifier alone (`Alt`) is held, so the pen Alt-clicks
-    while a finger rests on the key.
+    while a finger rests on the key. A key can have a colour of its own (nine presets plus
+    anything the picker gives), lightening while it is held.
   - **The wheel** is a touch ring like a pen tablet's Touch Ring: turning clockwise zooms in,
     rotates the view clockwise, grows the freehand tools' size (Pencil, Paintbrush, Blob Brush,
     Eraser — the one `size` option, clamped 0.1–1000 pt like the tool's own), or steps
@@ -64,14 +74,18 @@ VectorCraftActivity.java (extends GameActivity)      libvectorcraft_android.so (
     switches between the configured functions (Zoom, Rotate, Size, Undo/Redo — any subset, in
     order); the readout (zoom %, rotation °, size pt, or Undo/Redo) shows in the centre while
     it is open.
+  - **The screen key** above the keyboard key steps through full screen: normal → full screen
+    with the menu bar kept (the touch router keeps working) → full screen, drawn with nothing
+    else, no menu bar → back to normal. Drawn like a video player's, showing the next step.
   - **The keyboard key** at the very bottom opens the on-screen keyboard (and closes it again),
     whose letters reach the app's shortcuts.
   - **The gear key** at the very top opens the settings window (note: VectorCraft's `Services`
     has no platform menu to hang menu rows on, so the settings live here rather than in a
-    Window › Shortcut Pad menu): the pad's side, key count, every key's label and shortcut, the
-    wheel's functions, the large ring's size and its sensitivity (1×: a quarter turn doubles
-    the zoom), plus the Touch Input settings (one-finger mode, the gestures and taps, palm
-    rejection). Both save to the app's files directory like the desktop's preferences.
+    Window › Shortcut Pad menu): the pad's side, key count, every key's label, colour and
+    shortcut, the wheel's functions, the large ring's size and its sensitivity (1×: a quarter
+    turn doubles the zoom), plus the Touch Input settings (one-finger mode, the gestures and
+    taps, palm rejection, hold-to-right-click, and the pen buttons). Both save to the app's
+    files directory like the desktop's preferences.
 
 
 ## Building

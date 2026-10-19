@@ -29,6 +29,7 @@ pub mod bridge;
 pub mod ime;
 pub mod keys;
 pub mod pad;
+pub mod pen_path;
 pub mod services;
 pub mod touch;
 

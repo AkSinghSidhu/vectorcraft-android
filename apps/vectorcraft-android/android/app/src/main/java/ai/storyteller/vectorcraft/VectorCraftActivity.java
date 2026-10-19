@@ -65,11 +65,11 @@ public class VectorCraftActivity extends GameActivity {
     }
 
     /** One pointer of a MotionEvent (vectorcraft-tablet's android.rs). */
-    private static native void nativePen(int action, int tool, int buttons, float pressure, float tilt, float orientation);
+    private static native void nativePen(int action, int tool, int buttons, float pressure, float tilt, float orientation, float x, float y);
 
-    /** A pointer went down: its id and tool type, so Rust tells fingers from pens (touch
-     * gestures, palm rejection; vectorcraft-tablet's android.rs). */
-    private static native void nativePointer(int id, int tool);
+    /** A pointer went down: its id, tool type and buttons, so Rust tells fingers from pens and a
+     * right-click from a click (touch gestures, palm rejection; vectorcraft-tablet's android.rs). */
+    private static native void nativePointer(int id, int tool, int buttons);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -193,7 +193,7 @@ public class VectorCraftActivity extends GameActivity {
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             int i = e.getActionIndex();
             try {
-                nativePointer(e.getPointerId(i), e.getToolType(i));
+                nativePointer(e.getPointerId(i), e.getToolType(i), e.getButtonState());
             } catch (UnsatisfiedLinkError err) {
                 // The library isn't loaded: every pointer counts as a finger.
             }
@@ -243,10 +243,12 @@ public class VectorCraftActivity extends GameActivity {
                 // Samples the digitizer reported between two frames, oldest first.
                 for (int h = 0; h < e.getHistorySize(); h++) {
                     nativePen(action, tool, buttons, e.getHistoricalPressure(p, h),
-                            e.getHistoricalAxisValue(MotionEvent.AXIS_TILT, p, h), e.getHistoricalOrientation(p, h));
+                            e.getHistoricalAxisValue(MotionEvent.AXIS_TILT, p, h), e.getHistoricalOrientation(p, h),
+                            e.getHistoricalX(p, h), e.getHistoricalY(p, h));
                 }
             }
-            nativePen(action, tool, buttons, e.getPressure(p), e.getAxisValue(MotionEvent.AXIS_TILT, p), e.getOrientation(p));
+            nativePen(action, tool, buttons, e.getPressure(p), e.getAxisValue(MotionEvent.AXIS_TILT, p), e.getOrientation(p),
+                    e.getX(p), e.getY(p));
         } catch (UnsatisfiedLinkError err) {
             // The library isn't loaded (it failed to load): the pen draws like a finger.
         } catch (RuntimeException err) {

@@ -30,13 +30,9 @@ pub fn services(bridge: Arc<Bridge>) -> Services {
         start_pick: Some(Box::new(move |request| start_pick(&b_start, request))),
         // Shown in line otherwise (asked outside a command): blocks the UI thread until
         // answered, like the desktop's synchronous dialogs on Windows. A folder: unavailable.
-        pick_open: Some(Box::new(move |pick| {
-            pick_in_line(&b_open, PickRequest::Open(pick.clone())).and_then(|ps| ps.into_iter().next())
-        })),
+        pick_open: Some(Box::new(move |pick| pick_in_line(&b_open, PickRequest::Open(pick.clone())).and_then(|ps| ps.into_iter().next()))),
         pick_open_multi: Some(Box::new(move || pick_in_line(&b_open_multi, PickRequest::OpenMany).unwrap_or_default())),
-        pick_save: Some(Box::new(move |pick| {
-            pick_in_line(&b_save, PickRequest::Save(pick.clone())).and_then(|ps| ps.into_iter().next())
-        })),
+        pick_save: Some(Box::new(move |pick| pick_in_line(&b_save, PickRequest::Save(pick.clone())).and_then(|ps| ps.into_iter().next()))),
         read: Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string()))),
         exists: Some(Box::new(|p: &str| Path::new(p).exists())),
         write: Some(Box::new(shared_write)),
@@ -71,9 +67,10 @@ fn shared_write(path: &str, bytes: &[u8]) -> Result<(), String> {
     }
     vectorcraft_engine::cmd::fileio::write_atomic(p, bytes).map_err(|e| e.to_string())?;
     if let Some(bridge) = BRIDGE.get()
-        && let Err(e) = bridge.mark_written(p) {
-            log::warn!("document write-back not queued: {e}");
-        }
+        && let Err(e) = bridge.mark_written(p)
+    {
+        log::warn!("document write-back not queued: {e}");
+    }
     Ok(())
 }
 
@@ -135,11 +132,7 @@ fn wire_request(bridge: &Bridge, request: &PickRequest) -> Option<(u64, Request)
 /// A save's suggested document name: the app's, else from its first file type (an empty picker
 /// name isn't usable — the SAF picker would have nothing to prefill and the user types one).
 fn name_for(pick: &FilePick) -> String {
-    let fallback = pick
-        .filters
-        .first()
-        .and_then(|(_, exts)| exts.first())
-        .map_or_else(|| "Untitled".to_string(), |e| format!("Untitled.{e}"));
+    let fallback = pick.filters.first().and_then(|(_, exts)| exts.first()).map_or_else(|| "Untitled".to_string(), |e| format!("Untitled.{e}"));
     bridge::file_name(&pick.name, &fallback)
 }
 
@@ -169,18 +162,22 @@ fn wait_for(bridge: &Bridge, id: u64) -> Option<Vec<String>> {
 /// one places them (`Share to VectorCraft` / `File › Place`, [PlaceArrival]s without a drop
 /// point, so the place cursor starts wherever the user next works).
 pub fn watch_incoming(bridge: Arc<Bridge>, inbox: vectorcraft_ui_egui::Inbox, place_inbox: vectorcraft_ui_egui::place::PlaceInbox, ctx: Context) {
-    let spawned = std::thread::Builder::new().name("incoming".into()).spawn(move || loop {
-        let files = bridge.take_incoming();
-        if !files.is_empty() {
-            inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(
-                files.iter().cloned().map(|(name, bytes)| (name, bytes.clone())),
-            );
-            place_inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(
-                files.into_iter().map(|(name, bytes)| vectorcraft_ui_egui::place::PlaceArrival { name, bytes, drop: None }),
-            );
-            ctx.request_repaint();
+    let spawned = std::thread::Builder::new().name("incoming".into()).spawn(move || {
+        loop {
+            let files = bridge.take_incoming();
+            if !files.is_empty() {
+                inbox
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend(files.iter().cloned().map(|(name, bytes)| (name, bytes.clone())));
+                place_inbox
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend(files.into_iter().map(|(name, bytes)| vectorcraft_ui_egui::place::PlaceArrival { name, bytes, drop: None }));
+                ctx.request_repaint();
+            }
+            std::thread::sleep(Duration::from_millis(400));
         }
-        std::thread::sleep(Duration::from_millis(400));
     });
     if let Err(e) = spawned {
         log::error!("incoming documents: {e}");

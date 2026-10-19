@@ -92,8 +92,10 @@ mod tests {
     #[test]
     fn ctrl_n_within_one_frame_is_a_shortcut() {
         let mut held = Held::default();
-        let out =
-            run(&mut held, vec![key(Key::ControlLeft, true), key(Key::N, true), Event::Text("n".into()), key(Key::ControlLeft, false), key(Key::N, false)]);
+        let out = run(
+            &mut held,
+            vec![key(Key::ControlLeft, true), key(Key::N, true), Event::Text("n".into()), key(Key::ControlLeft, false), key(Key::N, false)],
+        );
         let n_down = out.iter().find_map(|e| match e {
             Event::Key { key: Key::N, pressed: true, modifiers, .. } => Some(*modifiers),
             _ => None,
@@ -135,7 +137,8 @@ mod tests {
     #[test]
     fn alt_click_carries_alt() {
         let mut held = Held::default();
-        let click = Event::PointerButton { pos: egui::pos2(1.0, 1.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
+        let click =
+            Event::PointerButton { pos: egui::pos2(1.0, 1.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
         let out = run(&mut held, vec![key(Key::AltLeft, true), click]);
         assert!(matches!(out.last(), Some(Event::PointerButton { modifiers, .. }) if modifiers.alt));
     }

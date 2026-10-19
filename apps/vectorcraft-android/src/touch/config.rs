@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+pub use vectorcraft_tablet::motion::PenControl;
 
 /// What one finger does on the canvas.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,64 @@ impl FingerMode {
     }
 }
 
+/// What one of the pen's controls (a side button, the eraser end) does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PenAction {
+    /// In use, the pen erases (the Eraser tool, back to the previous tool after).
+    #[default]
+    Eraser,
+    /// A right-click under the pen: pressed while hovering, or held while touching.
+    RightClick,
+    /// A press runs a shortcut.
+    Shortcut,
+    /// Nothing (the eraser end draws like the tip).
+    Nothing,
+}
+
+impl PenAction {
+    pub const ALL: [PenAction; 4] = [PenAction::Eraser, PenAction::RightClick, PenAction::Shortcut, PenAction::Nothing];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PenAction::Eraser => "Erase",
+            PenAction::RightClick => "Right-click",
+            PenAction::Shortcut => "Run a shortcut",
+            PenAction::Nothing => "Nothing",
+        }
+    }
+}
+
+/// One pen control's setting.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PenSetting {
+    pub action: PenAction,
+    /// The shortcut a press runs ([`PenAction::Shortcut`]).
+    pub shortcut: String,
+}
+
+impl PenSetting {
+    fn new(action: PenAction) -> Self {
+        Self { action, shortcut: "Ctrl+Z".into() }
+    }
+}
+
+impl Default for PenSetting {
+    fn default() -> Self {
+        Self::new(PenAction::Eraser)
+    }
+}
+
+/// A pen control's name in the settings.
+pub fn pen_control_label(c: PenControl) -> &'static str {
+    match c {
+        PenControl::Lower => "Pen button 1",
+        PenControl::Upper => "Pen button 2",
+        PenControl::Top => "Pen button 3",
+        PenControl::EraserEnd => "Eraser end",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TouchConfig {
@@ -48,6 +107,11 @@ pub struct TouchConfig {
     pub palm_rejection: bool,
     /// Two fingers dragging over menus, panels and lists scroll them.
     pub two_finger_scroll: bool,
+    /// A finger held still on a button, tab or row right-clicks it.
+    pub long_press_right_click: bool,
+    /// The pen's controls, by [`PenControl::index`]: lower, upper and top side buttons, eraser
+    /// end.
+    pub pen: [PenSetting; 4],
 }
 
 impl Default for TouchConfig {
@@ -61,20 +125,40 @@ impl Default for TouchConfig {
             three_finger_tap: "Ctrl+Shift+Z".into(),
             palm_rejection: true,
             two_finger_scroll: true,
+            long_press_right_click: true,
+            // As a Wacom pen's on a PC: the lower button right-clicks; the eraser end erases.
+            pen: [
+                PenSetting::new(PenAction::RightClick),
+                PenSetting::new(PenAction::Eraser),
+                PenSetting::new(PenAction::Nothing),
+                PenSetting::new(PenAction::Eraser),
+            ],
         }
     }
 }
 
 impl TouchConfig {
+    pub fn pen(&self, c: PenControl) -> &PenSetting {
+        &self.pen[c.index()]
+    }
+
+    /// Which pen controls erase, for the pen hook.
+    pub fn erasing_controls(&self) -> [bool; 4] {
+        PenControl::ALL.map(|c| self.pen(c).action == PenAction::Eraser)
+    }
+
     pub fn sanitized(mut self) -> Self {
-        for s in [&mut self.two_finger_tap, &mut self.three_finger_tap] {
+        let [a, b, c, d] = &mut self.pen;
+        for s in [&mut self.two_finger_tap, &mut self.three_finger_tap, &mut a.shortcut, &mut b.shortcut, &mut c.shortcut, &mut d.shortcut] {
             *s = s.trim().chars().take(40).collect();
         }
         self
     }
 
     pub fn load(path: &Path) -> Self {
-        let read = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<TouchConfig>(&b).map_err(|e| log::warn!("touch input settings: {e}")).ok());
+        let read = std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<TouchConfig>(&b).map_err(|e| log::warn!("touch input settings: {e}")).ok());
         read.unwrap_or_default().sanitized()
     }
 
@@ -100,7 +184,9 @@ mod tests {
         std::fs::write(&path, br#"{"finger":"Navigate"}"#).unwrap();
         let c = TouchConfig::load(&path);
         assert_eq!(c.finger, FingerMode::Navigate);
-        assert!(c.zoom && c.palm_rejection);
+        assert!(c.zoom && c.palm_rejection && c.long_press_right_click);
+        assert_eq!(c.pen(PenControl::Lower).action, PenAction::RightClick);
+        assert_eq!(c.erasing_controls(), [false, true, false, true]);
         let saved = TouchConfig { finger: FingerMode::Gestures, two_finger_tap: "  Ctrl+0 ".into(), ..Default::default() }.sanitized();
         saved.save(&path).unwrap();
         assert_eq!(TouchConfig::load(&path).two_finger_tap, "Ctrl+0");

@@ -6,14 +6,18 @@
 //!   redoes (any shortcut can be chosen). One finger draws like the pen, moves the canvas, or
 //!   does nothing.
 //! - **Palm rejection:** fingers are ignored while the pen is down or near the screen.
-//! - **Menus, panels and lists:** a flick keeps scrolling, and two fingers scroll.
+//! - **Menus, panels and lists:** a flick keeps scrolling, and two fingers scroll. A finger held
+//!   still right-clicks.
+//! - **Pen buttons:** the lower, middle and top side buttons and the eraser end each erase,
+//!   right-click (a side button pressed while hovering clicks under the pen), run a shortcut or
+//!   do nothing. Each has a light in the settings that turns green while it's in use.
 //! - The settings live in the Shortcut Pad settings window (the pad's gear key).
 
 pub mod config;
 
 use crate::pad::config::{self as pad_config, PRESETS};
 use crate::pad::router::ViewMove;
-use config::TouchConfig;
+use config::{FingerMode, PenAction, PenControl, TouchConfig, pen_control_label};
 use vectorcraft_ui_egui::VectorcraftApp;
 use vectorcraft_ui_egui::canvas::Xf;
 use vectorcraft_ui_egui::theme::Tokens;
@@ -46,45 +50,89 @@ impl TouchInput {
         }
     }
 
-    /// The Touch Input section of the Shortcut Pad settings window.
-    pub fn settings_body(&mut self, ui: &mut egui::Ui, tk: &Tokens) {
+    /// The Touch Input section of the Shortcut Pad settings window. `held`: the pen controls in
+    /// use now (by [`PenControl::index`]), for their lights; `buttons`: the pen's button state as
+    /// Android reports it.
+    pub fn settings_body(&mut self, ui: &mut egui::Ui, tk: &Tokens, held: [bool; 4], buttons: i32) {
+        // The lights follow the pen, which doesn't wake the UI by itself while it hovers.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         let before = self.config.clone();
         let mut c = before.clone();
         ui.separator();
         ui.strong("Touch Input");
-        ui.strong("One finger on the canvas");
-        for m in config::FingerMode::ALL {
-            ui.radio_value(&mut c.finger, m, m.label());
-        }
-        ui.separator();
-        ui.strong("Two fingers on the canvas");
-        ui.checkbox(&mut c.pan, "Drag to move the canvas");
-        ui.checkbox(&mut c.zoom, "Pinch to zoom");
-        ui.checkbox(&mut c.rotate, "Twist to rotate the view");
-        ui.separator();
-        ui.strong("Taps on the canvas");
-        egui::Grid::new("touch_taps").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
-            tap_row(ui, tk, "Two-finger tap", "touch_two_tap", &mut c.two_finger_tap);
-            tap_row(ui, tk, "Three-finger tap", "touch_three_tap", &mut c.three_finger_tap);
+        // Scrolls on a short screen.
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            ui.strong("One finger on the canvas");
+            for m in FingerMode::ALL {
+                ui.radio_value(&mut c.finger, m, m.label());
+            }
+            ui.separator();
+            ui.strong("Two fingers on the canvas");
+            ui.checkbox(&mut c.pan, "Drag to move the canvas");
+            ui.checkbox(&mut c.zoom, "Pinch to zoom");
+            ui.checkbox(&mut c.rotate, "Twist to rotate the view");
+            ui.separator();
+            ui.strong("Taps on the canvas");
+            egui::Grid::new("touch_taps").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
+                tap_row(ui, tk, "Two-finger tap", "touch_two_tap", &mut c.two_finger_tap);
+                tap_row(ui, tk, "Three-finger tap", "touch_three_tap", &mut c.three_finger_tap);
+            });
+            ui.separator();
+            ui.checkbox(&mut c.palm_rejection, "Palm rejection: ignore fingers while the pen is on or near the screen");
+            ui.checkbox(&mut c.two_finger_scroll, "Two fingers scroll menus, panels and lists");
+            ui.checkbox(&mut c.long_press_right_click, "Hold a finger still to right-click (context menus, closing panels)");
+            ui.separator();
+            ui.strong("Pen buttons");
+            ui.label(
+                egui::RichText::new("Button 1 is nearest the tip. Press a button or turn the pen over: its light turns green.").color(tk.text_dim),
+            );
+            ui.label(egui::RichText::new(format!("Android reports the buttons as {buttons:#04x}")).color(tk.text_disabled).small());
+            egui::Grid::new("touch_pen_controls").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
+                for control in PenControl::ALL {
+                    let setting = &mut c.pen[control.index()];
+                    ui.horizontal(|ui| {
+                        pen_light(ui, tk, held[control.index()]);
+                        ui.label(pen_control_label(control));
+                    });
+                    let salt = format!("touch_pen_{control:?}");
+                    egui::ComboBox::from_id_salt(&salt).selected_text(setting.action.label()).width(150.0).show_ui(ui, |ui| {
+                        for a in PenAction::ALL {
+                            ui.selectable_value(&mut setting.action, a, a.label());
+                        }
+                    });
+                    ui.label("");
+                    ui.end_row();
+                    if setting.action == PenAction::Shortcut {
+                        tap_row(ui, tk, "    Shortcut", &format!("{salt}_shortcut"), &mut setting.shortcut);
+                    }
+                }
+            });
+            ui.separator();
+            if ui.button("Restore Touch Defaults").clicked() {
+                c = TouchConfig::default();
+            }
         });
-        ui.separator();
-        ui.checkbox(&mut c.palm_rejection, "Palm rejection: ignore fingers while the pen is on or near the screen");
-        ui.checkbox(&mut c.two_finger_scroll, "Two fingers scroll menus, panels and lists");
-        ui.separator();
-        if ui.button("Restore Touch Defaults").clicked() {
-            c = TouchConfig::default();
-        }
         if c != before {
             self.set_config(c);
         }
     }
 }
 
+/// A pen control's light: green while it's in use, so it's clear which button is which.
+fn pen_light(ui: &mut egui::Ui, tk: &Tokens, on: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    let fill = if on { egui::Color32::from_rgb(52, 199, 89) } else { tk.text_disabled.gamma_multiply(0.35) };
+    ui.painter().circle_filled(rect.center(), 5.0, fill);
+    ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, tk.text_disabled));
+}
+
 /// A tap's row: its name, a preset menu and the shortcut (typed or chosen).
 fn tap_row(ui: &mut egui::Ui, tk: &Tokens, name: &str, salt: &str, shortcut: &mut String) {
     ui.label(name);
-    let current =
-        PRESETS.iter().find(|(_, _, s)| s.eq_ignore_ascii_case(shortcut)).map_or(if shortcut.is_empty() { "Nothing" } else { "Custom" }, |(n, _, _)| *n);
+    let current = PRESETS
+        .iter()
+        .find(|(_, _, s)| s.eq_ignore_ascii_case(shortcut))
+        .map_or(if shortcut.is_empty() { "Nothing" } else { "Custom" }, |(n, _, _)| *n);
     egui::ComboBox::from_id_salt(salt).selected_text(current).width(150.0).show_ui(ui, |ui| {
         if ui.selectable_label(shortcut.is_empty(), "Nothing").clicked() {
             shortcut.clear();
@@ -135,7 +183,13 @@ impl Snapshot {
             let w = &vp.this_pass.widgets;
             let widgets = |l: egui::LayerId| -> Vec<Widget> {
                 w.get_layer(l)
-                    .map(|w| Widget { rect: w.rect, interact: w.interact_rect, click: w.sense.senses_click(), drag: w.sense.senses_drag(), enabled: w.enabled })
+                    .map(|w| Widget {
+                        rect: w.rect,
+                        interact: w.interact_rect,
+                        click: w.sense.senses_click(),
+                        drag: w.sense.senses_drag(),
+                        enabled: w.enabled,
+                    })
                     .collect()
             };
             let mut layers: Vec<(egui::Order, Vec<Widget>)> = order.iter().map(|l| (l.order, widgets(*l))).collect();
@@ -242,7 +296,7 @@ pub fn apply(app: &mut VectorcraftApp, moves: &[ViewMove]) {
 mod tests {
     use super::*;
     use crate::pad::router::ViewMove;
-    use egui::{pos2, Rect};
+    use egui::{Rect, pos2};
     use vectorcraft_geom::Point;
 
     /// A canvas mapping: the canvas somewhere mid-window, at `zoom` with the view centred on the
