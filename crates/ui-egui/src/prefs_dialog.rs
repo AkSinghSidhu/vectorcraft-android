@@ -535,6 +535,26 @@ mod tests {
         assert_eq!(a.ui.engine_prefs["keyboardIncrement"], json!(4.0));
     }
 
+    /// A phone's screen (portrait): the Preferences dialog stays inside it — the categories as a
+    /// wrapping row above the fields, and nothing past its edges.
+    #[test]
+    fn the_preferences_dialog_fits_a_phone_screen() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(500.0, 900.0));
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let mut a = app();
+        open(&mut a, Some("Performance"));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        // The window measures itself the first frame and is placed for good by the third.
+        for _ in 0..4 {
+            let mut out = ctx.run_ui(input.clone(), |ui| show(&mut a, ui.ctx()));
+            out.textures_delta.clear();
+        }
+        let rect = ctx.memory(|m| m.area_rect(egui::Id::new("dialog-preferences"))).expect("the dialog was shown");
+        // The modal may reach the screen's edges (8 pt of air), never past them.
+        assert!(screen.expand(9.0).contains_rect(rect), "the dialog is at {rect:?} in the {screen:?} screen");
+    }
+
     /// General › Show Tool Tips: off, a button held under the pointer shows no tool tip; back on,
     /// it does again (#394).
     #[test]
