@@ -91,6 +91,21 @@ struct Applied {
     bare_points: bool,
 }
 
+/// Whether the screen is small enough that a UI scaled for a desktop doesn't fit (a phone's):
+/// its short side is under about 640 pt at the device's own scale. A tablet's screen is wider
+/// than that, and a small desktop window keeps its scale. Android native and the web only.
+fn small_screen(ctx: &egui::Context) -> bool {
+    if !cfg!(any(target_os = "android", target_arch = "wasm32")) {
+        return false;
+    }
+    let screen = ctx.content_rect();
+    // The short side in points, at the device's own scale: points drawn at the current zoom
+    // scale back by it (the zoom cuts the points a screen offers; the physical screen doesn't
+    // change). Rotation keeps the same short side either way.
+    let short = screen.width().min(screen.height()) * ctx.zoom_factor();
+    short < 640.0
+}
+
 /// User Interface › Canvas Color: the canvas around the artboards, or `None` to match the
 /// interface brightness. The greys keep the white page's edge in view (#663).
 fn canvas_color(key: &str) -> Option<egui::Color32> {
@@ -145,7 +160,12 @@ pub fn apply_runtime(app: &mut VectorcraftApp, ctx: &egui::Context) {
         app.canvas.key = None;
         ctx.data_mut(|d| d.insert_temp(id, Some(want)));
     }
-    let z = app.session.prefs.ui_scaling.clamp(0.75, 2.0) as f32;
+    let mut z = app.session.prefs.ui_scaling.clamp(0.75, 2.0) as f32;
+    // A small screen (a phone's) is too small for the dialogs a desktop UI draws: on one the UI
+    // is at most 3/4, whatever the user chose (below 3/4 of the total, theirs stands).
+    if small_screen(ctx) {
+        z = z.min(0.75);
+    }
     if (ctx.zoom_factor() - z).abs() > 1e-3 {
         ctx.set_zoom_factor(z);
     }
